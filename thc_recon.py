@@ -11,7 +11,7 @@ import sys
 import time
 import re
 import os
-from typing import Set, Optional, Tuple
+from typing import Set, Optional, Tuple, List
 
 # ANSI colors
 class Colors:
@@ -116,7 +116,7 @@ def get_sleep_time(rate_limit_remaining: Optional[int]) -> float:
         return 2.2 - (rl * 0.1)
 
 class SubdomainCollector:
-    def __init__(self, output_file: str, verbose: bool = True):
+    def __init__(self, output_file: str, verbose: bool = False):
         """
         Initialize the subdomain collector
         
@@ -126,13 +126,23 @@ class SubdomainCollector:
         """
         self.output_file = output_file
         self.verbose = verbose
+        self.old_subdomains = set()
+        self.new_subdomains_found = set()
+        
+        # Load old subdomains if file exists (for comparison)
+        if os.path.exists(self.output_file):
+            with open(self.output_file, 'r') as f:
+                self.old_subdomains = {aggressive_strip_ansi(line).strip() for line in f if line.strip()}
+            if self.verbose:
+                print(f"{Colors.CYAN}Loaded {len(self.old_subdomains)} existing subdomains from {self.output_file}{Colors.END}")
+        
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
         })
         
     def print_status(self, target: str, fetched: int, total: Optional[int], 
-                    rate_limit: Optional[int], requests_made: int, resuming: bool = False):
+                    rate_limit: Optional[int], requests_made: int, new_count: int = 0):
         """
         Print live status update on same line
         """
@@ -142,12 +152,13 @@ class SubdomainCollector:
         remaining = total - fetched if total else 0
         total_str = total if total else "?"
         remaining_str = remaining if total else "?"
-        resume_str = " (Resuming)" if resuming else ""
+        
+        new_info = f"  |  {Colors.GRAY}New:{Colors.END} {Colors.GREEN}{new_count}{Colors.END}"
         
         status = (
-            f"{Colors.CYAN}{Colors.BOLD}Target:{Colors.END} {Colors.WHITE}{target}{Colors.END}{resume_str}  |  "
+            f"{Colors.CYAN}{Colors.BOLD}Target:{Colors.END} {Colors.WHITE}{target}{Colors.END}  |  "
             f"{Colors.GRAY}Fetched:{Colors.END} {Colors.GREEN}{fetched}{Colors.END}/{Colors.GREEN}{total_str}{Colors.END}  "
-            f"({Colors.GRAY}Remaining:{Colors.END} {Colors.GREEN}{remaining_str}{Colors.END})  |  "
+            f"({Colors.GRAY}Remaining:{Colors.END} {Colors.GREEN}{remaining_str}{Colors.END}){new_info}  |  "
             f"{Colors.GRAY}Rate Limit:{Colors.END} {Colors.YELLOW}{rate_limit if rate_limit else '?'}{Colors.END}  |  "
             f"{Colors.GRAY}Requests:{Colors.END} {Colors.WHITE}{requests_made}{Colors.END}"
         )
@@ -170,18 +181,6 @@ class SubdomainCollector:
         total_requests = 0
         total_entries = None
         rate_limit = None
-        
-        # Check for existing progress (auto-resume)
-        resuming = False
-        if os.path.exists(self.output_file):
-            with open(self.output_file, 'r') as f:
-                # Clean ANSI codes from existing lines too
-                existing = {aggressive_strip_ansi(line).strip() for line in f if line.strip()}
-                if existing:
-                    all_subdomains.update(existing)
-                    resuming = True
-                    if self.verbose:
-                        print(f"{Colors.YELLOW}Resuming: {len(existing)} entries already in {self.output_file}{Colors.END}")
         
         if self.verbose:
             print(f"{Colors.WHITE}Starting collection for domain: {domain}{Colors.END}\n")
@@ -223,20 +222,18 @@ class SubdomainCollector:
             if rate_limit_new is not None:
                 rate_limit = rate_limit_new
             
-            # Add new subdomains
-            new_count = 0
+            # Add subdomains and track new ones
             for subdomain in results:
                 if subdomain not in all_subdomains:
                     all_subdomains.add(subdomain)
-                    new_count += 1
-            
-            # Save progress after each page (auto-save)
-            with open(self.output_file, 'w') as f:
-                for subdomain in sorted(all_subdomains):
-                    f.write(f"{subdomain}\n")
+                    
+                    # Track if this is a new subdomain (not in old file)
+                    if subdomain not in self.old_subdomains:
+                        self.new_subdomains_found.add(subdomain)
             
             # Update status
-            self.print_status(domain, len(all_subdomains), total_entries, rate_limit, total_requests, resuming)
+            new_count = len(self.new_subdomains_found)
+            self.print_status(domain, len(all_subdomains), total_entries, rate_limit, total_requests, new_count)
             
             # Check if there's a next page
             if next_page:
@@ -253,44 +250,67 @@ class SubdomainCollector:
         
         return all_subdomains
     
-    def process_targets(self, targets: list[str]):
+    def process_targets(self, targets: List[str]):
         """
         Process multiple target domains
         
         Args:
             targets: List of target domains
         """
-        print(f"\n{Colors.CYAN}{Colors.BOLD}{'='*80}{Colors.END}")
-        print(f"{Colors.CYAN}{Colors.BOLD}Subdomain Collector - ip.thc.org API{Colors.END}")
-        print(f"{Colors.CYAN}{Colors.BOLD}{'='*80}{Colors.END}\n")
+        if self.verbose:
+            print(f"\n{Colors.CYAN}{Colors.BOLD}{'='*80}{Colors.END}")
+            print(f"{Colors.CYAN}{Colors.BOLD}Subdomain Collector - ip.thc.org API{Colors.END}")
+            print(f"{Colors.CYAN}{Colors.BOLD}{'='*80}{Colors.END}\n")
         
         all_results = set()
         
         for i, domain in enumerate(targets, 1):
-            print(f"{Colors.WHITE}Processing target {i}/{len(targets)}: {domain}{Colors.END}")
+            if self.verbose:
+                print(f"{Colors.WHITE}Processing target {i}/{len(targets)}: {domain}{Colors.END}")
             
             try:
                 subdomains = self.collect_subdomains(domain)
                 all_results.update(subdomains)
                 
-                print(f"\n{Colors.GREEN}Collected {len(subdomains)} subdomains for {domain}{Colors.END}\n")
+                if self.verbose:
+                    print(f"\n{Colors.GREEN}Collected {len(subdomains)} subdomains for {domain}{Colors.END}\n")
                 
             except KeyboardInterrupt:
                 print(f"\n\n{Colors.YELLOW}Interrupted by user (Ctrl+C){Colors.END}")
-                print(f"{Colors.WHITE}Progress saved to: {self.output_file}{Colors.END}")
-                print(f"{Colors.RED}{Colors.BOLD}Run the same command again to resume.{Colors.END}")
+                print(f"{Colors.WHITE}Progress saved{Colors.END}")
                 sys.exit(0)
         
+        # Save all results to main output file
+        with open(self.output_file, 'w') as f:
+            for subdomain in sorted(all_results):
+                f.write(f"{subdomain}\n")
+        
+        # Save new subdomains to new_subs.txt
+        if self.new_subdomains_found:
+            new_file = "new_subs.txt"
+            with open(new_file, 'w') as f:
+                for subdomain in sorted(self.new_subdomains_found):
+                    f.write(f"{subdomain}\n")
+            
+            print(f"{Colors.GREEN}New subdomains found: {len(self.new_subdomains_found)}{Colors.END}")
+            print(f"{Colors.WHITE}New subdomains saved to: {new_file}{Colors.END}")
+        else:
+            print(f"{Colors.YELLOW}No new subdomains found (all {len(all_results)} were already known){Colors.END}")
+        
         # Final summary
-        print(f"{Colors.CYAN}{Colors.BOLD}{'='*80}{Colors.END}")
-        print(f"{Colors.BOLD}SUMMARY{Colors.END}")
-        print(f"{Colors.CYAN}{'='*80}{Colors.END}")
+        if self.verbose:
+            print(f"\n{Colors.CYAN}{Colors.BOLD}{'='*80}{Colors.END}")
+            print(f"{Colors.BOLD}SUMMARY{Colors.END}")
+            print(f"{Colors.CYAN}{'='*80}{Colors.END}")
+        
         print(f"{Colors.GREEN}Total unique subdomains: {len(all_results)}{Colors.END}")
         print(f"{Colors.WHITE}Saved to: {self.output_file}{Colors.END}")
-        print(f"{Colors.CYAN}{'='*80}{Colors.END}")
+        
+        if self.verbose:
+            print(f"{Colors.CYAN}{'='*80}{Colors.END}")
 
 
-def read_targets_from_file(filename: str) -> list[str]:
+def read_targets_from_file(filename: str) -> List[str]:
     """
     Read target domains from file
     
@@ -309,50 +329,22 @@ def read_targets_from_file(filename: str) -> list[str]:
         sys.exit(1)
 
 
-def clean_ansi_from_file(input_file: str, output_file: Optional[str] = None):
+def parse_comma_separated(targets: List[str]) -> List[str]:
     """
-    Clean ANSI codes from an existing file
+    Parse comma-separated targets into individual domains
     
     Args:
-        input_file: Input file with ANSI codes
-        output_file: Output file (if None, overwrites input)
+        targets: List of target strings (may contain commas)
+        
+    Returns:
+        List of individual domain names
     """
-    print(f"\n{Colors.CYAN}{Colors.BOLD}Cleaning ANSI codes from file...{Colors.END}\n")
-    
-    # Read input
-    try:
-        with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        print(f"{Colors.RED}Error: File '{input_file}' not found{Colors.END}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"{Colors.RED}Error reading file: {e}{Colors.END}", file=sys.stderr)
-        sys.exit(1)
-    
-    # Clean lines
-    cleaned_lines = []
-    for line in lines:
-        cleaned = aggressive_strip_ansi(line)
-        if cleaned:  # Only add non-empty lines
-            cleaned_lines.append(cleaned)
-    
-    # Remove duplicates and sort
-    unique_lines = sorted(set(cleaned_lines))
-    
-    # Write output
-    output = output_file if output_file else input_file
-    try:
-        with open(output, 'w', encoding='utf-8') as f:
-            for line in unique_lines:
-                f.write(line + '\n')
-        
-        print(f"{Colors.GREEN}✓ Cleaned {len(lines)} lines → {len(unique_lines)} unique domains{Colors.END}")
-        print(f"{Colors.GREEN}✓ Saved to: {output}{Colors.END}\n")
-        
-    except Exception as e:
-        print(f"{Colors.RED}Error writing file: {e}{Colors.END}", file=sys.stderr)
-        sys.exit(1)
+    result = []
+    for target in targets:
+        # Split by comma and strip whitespace
+        domains = [d.strip() for d in target.split(',') if d.strip()]
+        result.extend(domains)
+    return result
 
 
 def main():
@@ -361,29 +353,33 @@ def main():
                     f'{Colors.GRAY}Based on thc_recon.py by Tommy DeVoss{Colors.END}',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f'''{Colors.CYAN}Examples:{Colors.END}
-  # Collect subdomains
-  python3 %(prog)s -t example.com -o subdomains.txt
-  python3 %(prog)s -t example.com another.com -o subs.txt
+  # Collect subdomains (compares with existing subs.txt automatically)
+  python3 %(prog)s -t example.com -o subs.txt
+  python3 %(prog)s -t example.com,another.com,test.com -o subs.txt
   python3 %(prog)s -f domains.txt -o output.txt
   
-  # Clean ANSI codes from existing file
-  python3 %(prog)s --clean subs.txt
-  python3 %(prog)s --clean subs.txt -o clean_subs.txt
+  # Verbose mode with detailed progress
+  python3 %(prog)s -t example.com -o subs.txt -v
   
 {Colors.YELLOW}Features:{Colors.END}
-  • Auto-resume if interrupted (run same command to continue)
+  • Auto-comparison with existing file (new subdomains → new_subs.txt)
   • Intelligent rate limiting (faster when possible)
-  • Real-time progress display
-  • Auto-save after each page
+  • Real-time progress display (with -v flag)
   • Automatic ANSI code cleaning
-  • Clean existing files with --clean
+  • Comma-separated targets support
+  
+{Colors.GRAY}How it works:{Colors.END}
+  1. Loads existing subdomains from output file (if exists)
+  2. Collects new results from API
+  3. Saves ALL results to output file (overwrites)
+  4. Saves ONLY NEW subdomains to new_subs.txt
         '''
     )
     
     parser.add_argument('-t', '--target', 
                         nargs='+',
                         metavar='DOMAIN',
-                        help='Target domain(s) to scan')
+                        help='Target domain(s) to scan (comma-separated or space-separated)')
     
     parser.add_argument('-f', '--file',
                         metavar='FILE',
@@ -391,32 +387,22 @@ def main():
     
     parser.add_argument('-o', '--output',
                         metavar='FILE',
-                        help='Output file for collected subdomains')
+                        help='Output file for collected subdomains',
+                        required=True)
     
-    parser.add_argument('-q', '--quiet',
+    parser.add_argument('-v', '--verbose',
                         action='store_true',
-                        help='Quiet mode (minimal output)')
-    
-    parser.add_argument('--clean',
-                        metavar='FILE',
-                        help='Clean ANSI codes from existing file (use with -o for different output)')
+                        help='Verbose mode (show detailed progress)')
     
     args = parser.parse_args()
-    
-    # Handle clean mode
-    if args.clean:
-        clean_ansi_from_file(args.clean, args.output)
-        return
-    
-    # Regular collection mode requires output
-    if not args.output:
-        parser.error("the following arguments are required: -o/--output (unless using --clean)")
     
     # Collect targets from both sources
     targets = []
     
     if args.target:
-        targets.extend(args.target)
+        # Parse comma-separated targets
+        parsed_targets = parse_comma_separated(args.target)
+        targets.extend(parsed_targets)
     
     if args.file:
         targets.extend(read_targets_from_file(args.file))
@@ -433,7 +419,7 @@ def main():
             unique_targets.append(target)
     
     # Create collector and process targets
-    collector = SubdomainCollector(args.output, verbose=not args.quiet)
+    collector = SubdomainCollector(args.output, verbose=args.verbose)
     
     try:
         collector.process_targets(unique_targets)
