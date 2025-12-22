@@ -5,9 +5,8 @@ A powerful subdomain enumeration tool using the ip.thc.org API with automatic ch
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/subdomain-collector.git
-cd subdomain-collector
-pip install requests
+git clone https://github.com/reewardius/thc_recon.py
+cd thc_recon.py
 ```
 
 ## Requirements
